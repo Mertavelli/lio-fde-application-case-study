@@ -59,6 +59,8 @@ class ProcurementRequest(Base, TimestampMixin):
     approved_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
     )
+    approval_source: Mapped[str | None] = mapped_column(String, nullable=True)
+    classification: Mapped[dict | None] = mapped_column(JSON, nullable=True)
 
     # Financial
     total_cost: Mapped[float | None] = mapped_column(Numeric(12, 2), nullable=True)

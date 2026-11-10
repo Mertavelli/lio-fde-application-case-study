@@ -397,8 +397,7 @@ def test_pdf_parse():
         files={"file": ("offer.pdf", buf.getvalue(), "application/pdf")},
         headers=_auth(token),
     )
-    assert r.status_code == 200, r.text
-    assert "text" in r.json()  # blank page -> empty text, but parses fine
+    assert r.status_code == 422  # no selectable text needs manual entry
 
     # non-PDF rejected
     r = client.post(
@@ -419,9 +418,9 @@ def test_activity_log_and_document():
     payload = {
         "requestorName": "Alex Admin", "titleShortDescription": "Chairs",
         "vendorName": "FurnitureCo", "vatId": "12-0000001", "commodityGroupId": 15,
-        "totalCost": 500.0, "department": "Ops",
+        "totalCost": 2500.0, "department": "Ops",
         "orderLines": [
-            {"positionDescription": "Chair", "unitPrice": 250, "amount": 2, "unit": "pc", "totalPrice": 500}
+            {"positionDescription": "Chair", "unitPrice": 1250, "amount": 2, "unit": "pc", "totalPrice": 2500}
         ],
     }
     rid = client.post("/requests", json=payload, headers=_auth(admin)).json()["id"]
@@ -429,24 +428,20 @@ def test_activity_log_and_document():
     # edit two fields -> one 'updated' activity naming those fields
     updated = dict(payload)
     updated["title"] = "Office Chairs"
-    updated["totalCost"] = 600.0
+    updated["totalCost"] = 2600.0
     updated["orderLines"] = [
-        {"positionDescription": "Chair", "unitPrice": 300, "amount": 2, "unit": "pc", "totalPrice": 600}
+        {"positionDescription": "Chair", "unitPrice": 1300, "amount": 2, "unit": "pc", "totalPrice": 2600}
     ]
     # RequestUpdate uses "title" (not titleShortDescription)
     updated = {
         "requestorName": "Alex Admin", "title": "Office Chairs", "vendorName": "FurnitureCo",
-        "vatId": "12-0000001", "commodityGroupId": 15, "totalCost": 600.0, "department": "Ops",
+        "vatId": "12-0000001", "commodityGroupId": 15, "totalCost": 2600.0, "department": "Ops",
         "orderLines": updated["orderLines"],
     }
     r = client.put(f"/requests/{rid}", json=updated, headers=_auth(admin))
     assert r.status_code == 200, r.text
 
-    # approve, then a status change
-    client.patch(f"/requests/{rid}/approval", json={"decision": "approved"}, headers=_auth(admin))
-    client.patch(f"/requests/{rid}/status", json={"status": "closed"}, headers=_auth(admin))
-
-    # attach a PDF
+    # attach the source PDF before approval, so the approved request is immutable
     writer = PdfWriter()
     writer.add_blank_page(width=200, height=200)
     buf = io.BytesIO()
@@ -458,12 +453,19 @@ def test_activity_log_and_document():
     )
     assert r.status_code == 204, r.text
 
+    # A missing model leaves unknown articles for human review before approval.
+    reviewed = client.post(f"/requests/{rid}/classification-review",
+        json={"kinds": ["other"], "reason": "Reviewed furniture quote"}, headers=_auth(admin))
+    assert reviewed.status_code == 200, reviewed.text
+    client.patch(f"/requests/{rid}/approval", json={"decision": "approved"}, headers=_auth(admin))
+    client.patch(f"/requests/{rid}/status", json={"status": "closed"}, headers=_auth(admin))
+
     # activity feed (newest first) captures every event
     r = client.get(f"/requests/{rid}/activity", headers=_auth(admin))
     assert r.status_code == 200
     actions = [a["action"] for a in r.json()]
     assert set(actions) == {
-        "created", "updated", "approved", "status_changed", "document_attached"
+        "created", "updated", "classification_reviewed", "approved", "status_changed", "document_attached"
     }
     updated_entry = next(a for a in r.json() if a["action"] == "updated")
     assert set(updated_entry["detail"]["changed_fields"]) == {
@@ -479,10 +481,16 @@ def test_activity_log_and_document():
     client.delete(f"/requests/{rid}", headers=_auth(admin))
 
 
-def test_extraction_without_api_key():
+def test_extraction_without_api_key(monkeypatch):
+    from app.core.config import settings
+
+    monkeypatch.setattr(settings, "openai_api_key", "")
     r = client.post("/auth/signup", json={"email": "ex@example.com", "password": "secret123"})
     token = r.json()["access_token"]
 
+    r = client.post("/extraction", json={"text": "Quote No. 123"}, headers=_auth(token))
+    assert r.status_code == 403  # extraction needs an organization for booking rules
+    token = _signin("requester@acme.com")
     r = client.post("/extraction", json={"text": "Quote No. 123"}, headers=_auth(token))
     assert r.status_code == 200
     body = r.json()
@@ -670,6 +678,10 @@ def test_approval_flow_with_roles():
     )
     assert r.status_code == 403
 
+    # Buyer resolves the unknown item classification before approving.
+    reviewed = client.post(f"/requests/{request_id}/classification-review",
+        json={"kinds": ["other"], "reason": "Reviewed laptop specification"}, headers=_auth(buyer))
+    assert reviewed.status_code == 200, reviewed.text
     # buyer approves
     r = client.patch(
         f"/requests/{request_id}/approval",
@@ -730,7 +742,7 @@ def test_org_settings_required_fields():
     # Default settings: nothing extra required.
     r = client.get("/organizations/me/settings", headers=_auth(token))
     assert r.status_code == 200
-    assert r.json() == {"required_fields": []}
+    assert r.json() == {"required_fields": [], "category_rules": [], "auto_approve_below": None}
 
     base_payload = {
         "requestorName": "S", "titleShortDescription": "T", "vendorName": "V",

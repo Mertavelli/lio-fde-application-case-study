@@ -9,6 +9,7 @@ from sqlalchemy.orm import Session
 from app.core.deps import get_current_membership, get_current_user, require_org_admin
 from app.db.session import get_db
 from app.models import (
+    CommodityGroup,
     Organization,
     OrganizationInvite,
     OrganizationMember,
@@ -95,9 +96,13 @@ def update_settings(
     db: Session = Depends(get_db),
 ) -> OrganizationSettings:
     org = db.get(Organization, membership.organization_id)
-    org.settings = payload.model_dump()
+    if "category_rules" in payload.model_fields_set:
+        valid = set(db.scalars(select(CommodityGroup.id)))
+        if any(rule.commodity_group_id not in valid for rule in payload.category_rules):
+            raise HTTPException(status_code=422, detail="Unknown commodity group in category rule")
+    org.settings = {**(org.settings or {}), **payload.model_dump(exclude_unset=True)}
     db.commit()
-    return payload
+    return OrganizationSettings(**org.settings)
 
 
 @router.get("/me/members", response_model=MembersResponse)

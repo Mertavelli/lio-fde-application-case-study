@@ -1,4 +1,5 @@
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, status
+from starlette.concurrency import run_in_threadpool
 
 from app.core.deps import get_current_user
 from app.schemas.extraction import PdfParseResponse
@@ -16,19 +17,28 @@ async def parse_pdf(file: UploadFile) -> PdfParseResponse:
             status_code=status.HTTP_400_BAD_REQUEST, detail="Please upload a PDF file"
         )
 
-    pdf_bytes = await file.read()
+    pdf_bytes = await file.read(MAX_PDF_BYTES + 1)
     if len(pdf_bytes) > MAX_PDF_BYTES:
         raise HTTPException(
             status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
             detail="PDF exceeds the 10MB limit",
         )
 
+    if not pdf_bytes.startswith(b"%PDF-"):
+        raise HTTPException(status_code=422, detail="File is not a PDF")
+
     try:
-        text = extract_text(pdf_bytes)
+        text = await run_in_threadpool(extract_text, pdf_bytes)
+    except ValueError as exc:
+        if str(exc) in ("PDF exceeds the 50-page limit", "PDF text exceeds the 100,000-character limit", "Scanned PDF exceeds the 10-page OCR limit"):
+            raise HTTPException(status_code=413, detail=str(exc)) from exc
+        raise HTTPException(status_code=422, detail="Failed to parse PDF") from exc
     except Exception:  # noqa: BLE001 — mirror the original catch-all
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
             detail="Failed to parse PDF",
         )
 
+    if not text.strip():
+        raise HTTPException(status_code=422, detail="PDF has no selectable text; enter details manually")
     return PdfParseResponse(text=text)

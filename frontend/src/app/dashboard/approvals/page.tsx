@@ -158,7 +158,8 @@ export default function ApprovalsPage() {
                       : 'bg-red-100 text-red-700'
                   }`}
                 >
-                  {request.approval_status}
+                  {request.approval_status === 'approved' && !request.approved_by && request.approved_at
+                    ? 'Auto approved' : request.approval_status}
                 </span>
               </div>
             ))}

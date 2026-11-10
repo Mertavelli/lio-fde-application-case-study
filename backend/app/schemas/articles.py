@@ -2,7 +2,7 @@ import uuid
 from datetime import datetime
 from decimal import Decimal
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 
 
 class ArticleOut(BaseModel):
@@ -27,3 +27,11 @@ class ArticlePage(BaseModel):
     total: int
     limit: int
     offset: int
+
+
+class SemanticSuggestionIn(BaseModel):
+    description: str = Field(min_length=3, max_length=300)
+    unit: str = Field(min_length=1, max_length=50)
+    supplier: str = Field(default="", max_length=200)
+    unit_price: float | None = Field(default=None, gt=0, le=1_000_000_000, allow_inf_nan=False)
+    amount: float | None = Field(default=None, gt=0, le=1_000_000_000, allow_inf_nan=False)

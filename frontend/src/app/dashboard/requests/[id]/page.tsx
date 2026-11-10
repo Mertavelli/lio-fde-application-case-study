@@ -30,12 +30,15 @@ export default function RequestDetailPage() {
   const [request, setRequest] = useState<ProcurementRequestWithDetails | null>(null);
   const [activity, setActivity] = useState<api.RequestActivity[]>([]);
   const [role, setRole] = useState<api.MemberRole | null>(null);
+  const [userId, setUserId] = useState<string | null>(null);
   const [pdfUrl, setPdfUrl] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
   const [success, setSuccess] = useState('');
   const [busy, setBusy] = useState(false);
   const [editing, setEditing] = useState(false);
+  const [reviewKinds, setReviewKinds] = useState<string[]>([]);
+  const [reviewReason, setReviewReason] = useState('');
 
   // Edit form state
   const [form, setForm] = useState({
@@ -45,13 +48,16 @@ export default function RequestDetailPage() {
 
   const load = async () => {
     try {
-      const [req, org, acts] = await Promise.all([
+      const [req, org, acts, me] = await Promise.all([
         api.requests.get(id),
         api.organizations.getMine(),
         api.requests.getActivity(id),
+        api.auth.me(),
       ]);
       setRequest(req);
+      setReviewKinds(req.classification?.items?.map((item) => item.kind === 'uncertain' ? '' : item.kind) || []);
       setRole(org.role);
+      setUserId(me.user.id);
       setActivity(acts);
       const url = await api.requests.documentUrl(id).catch(() => null);
       setPdfUrl(url);
@@ -62,6 +68,9 @@ export default function RequestDetailPage() {
   };
 
   useEffect(() => {
+    if (new URLSearchParams(window.location.search).get('attachment') === 'failed') {
+      setError('Request created, but its PDF could not be attached. Use Attach PDF below to retry.');
+    }
     load();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [id]);
@@ -183,6 +192,12 @@ export default function RequestDetailPage() {
   }
 
   const canApprove = (role === 'buyer' || role === 'admin') && request.approval_status === 'pending';
+  const canChange = role === 'admin' || request.created_by === userId;
+  const autoApproved = request.approval_status === 'approved' && request.approval_source === 'automatic';
+  const canEdit = canChange && request.status !== 'closed' && (request.approval_status === 'pending' || autoApproved);
+  const canDelete = canChange && (role === 'admin' || request.approval_status === 'pending');
+  const canChangeStatus = canChange || role === 'buyer';
+  const canAttach = canChange && (request.approval_status === 'pending' || (autoApproved && !pdfUrl));
 
   return (
     <div className="max-w-[1600px] mx-auto px-4 sm:px-6 lg:px-8 py-8">
@@ -199,35 +214,58 @@ export default function RequestDetailPage() {
               {titleCase(request.status)}
             </span>
             <span className={`inline-flex px-2.5 py-1 text-xs font-semibold rounded-full ${APPROVAL_BADGE[request.approval_status]}`}>
-              {titleCase(request.approval_status)}
+              {autoApproved ? 'Auto approved' : titleCase(request.approval_status)}
             </span>
           </div>
         </div>
         <div className="flex flex-wrap gap-2">
-          {canApprove && (
+          {canApprove && !request.classification?.review_required && (
             <>
               <Button size="sm" onClick={() => decide('approved')} disabled={busy}>Approve</Button>
               <Button size="sm" variant="outline" className="text-red-600 border-red-300 hover:bg-red-50"
                 onClick={() => decide('rejected')} disabled={busy}>Reject</Button>
             </>
           )}
-          <Button size="sm" variant="outline" onClick={openEdit} disabled={busy}>Edit</Button>
-          <Button size="sm" variant="outline" className="text-red-600 border-red-300 hover:bg-red-50"
-            onClick={remove} disabled={busy}>Delete</Button>
+          {canApprove && request.classification?.review_required && <Button size="sm" variant="outline" className="text-red-600 border-red-300" onClick={() => decide('rejected')} disabled={busy}>Reject</Button>}
+          {canEdit && <Button size="sm" variant="outline" onClick={openEdit} disabled={busy}>Edit</Button>}
+          {canDelete && <Button size="sm" variant="outline" className="text-red-600 border-red-300 hover:bg-red-50"
+            onClick={remove} disabled={busy}>Delete</Button>}
         </div>
       </div>
 
       {error && <Alert variant="error" className="mb-6">{error}</Alert>}
       {success && <Alert variant="success" className="mb-6">{success}</Alert>}
+      {request.classification?.review_required && <div className="lio-card p-4 mb-6">
+        <p className="font-medium">Article classification needs buyer review before approval.</p>
+        <p className="text-sm text-ink/60">{request.classification.reason}</p>
+        {request.order_lines.map((line, index) => <div key={line.id} className="mt-3 text-sm">
+          <span>{line.position_description}</span>
+          <span className="block text-ink/50">{request.classification?.items?.[index]?.evidence}</span>
+          {(role === 'buyer' || role === 'admin') && <select aria-label={`Article kind for line ${index + 1}`} className="mt-1 border rounded p-2"
+            value={reviewKinds[index] || ''} onChange={(event) => setReviewKinds((current) => current.map((kind, i) => i === index ? event.target.value : kind))}>
+            <option value="">Select article kind</option>
+            <option value="cable_tie">Cable ties</option><option value="printer_toner">Printer toner</option>
+            <option value="software_subscription">Software subscription</option><option value="other">Other</option>
+          </select>}
+        </div>)}
+        {(role === 'buyer' || role === 'admin') && <><Input label="Reason for classification" value={reviewReason} onChange={(event) => setReviewReason(event.target.value)} className="mt-3" />
+          <Button type="button" className="mt-3" disabled={busy || reviewKinds.length !== request.order_lines.length || reviewKinds.some((kind) => !kind) || reviewReason.trim().length < 5}
+          onClick={async () => {
+            setBusy(true); setError('');
+            try { await api.requests.reviewClassification(id, reviewKinds, reviewReason); await refresh(); }
+            catch (err) { setError(err instanceof Error ? err.message : 'Review failed'); }
+            finally { setBusy(false); }
+          }}>Confirm article kinds</Button></>}
+      </div>}
 
       {/* Status control */}
-      <div className="lio-card p-4 mb-6 flex flex-wrap items-center gap-3">
+      {canChangeStatus && <div className="lio-card p-4 mb-6 flex flex-wrap items-center gap-3">
         <span className="text-sm font-medium text-ink/70">Status:</span>
         {(['open', 'in_progress', 'closed'] as const).map((s) => (
           <button
             key={s}
             onClick={() => changeStatus(s)}
-            disabled={busy || request.status === s}
+            disabled={busy || request.status === s || (request.classification?.review_required && s !== 'open') || (s === 'closed' && request.approval_status === 'pending')}
             className={`px-4 py-2 rounded-full text-sm font-medium transition-colors disabled:opacity-100 ${
               request.status === s
                 ? 'bg-ink text-white'
@@ -237,7 +275,7 @@ export default function RequestDetailPage() {
             {titleCase(s)}
           </button>
         ))}
-      </div>
+      </div>}
 
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
         {/* Left column: details, order lines, activity */}
@@ -296,6 +334,29 @@ export default function RequestDetailPage() {
         {/* Right column: PDF viewer */}
         <div className="lio-card p-6">
           <h2 className="text-lg font-semibold tracking-tight text-ink mb-4">Original Document</h2>
+          {canAttach && (
+            <label className="mb-4 block text-sm text-accent-deep font-medium">
+              {pdfUrl ? 'Replace PDF' : 'Attach PDF'}
+              <input type="file" accept="application/pdf" className="mt-2 block text-sm text-ink"
+                disabled={busy} onChange={async (event) => {
+                  const selected = event.target.files?.[0];
+                  if (!selected) return;
+                  setBusy(true); setError('');
+                  try {
+                    await api.requests.uploadDocument(id, selected);
+                    const url = await api.requests.documentUrl(id);
+                    setPdfUrl(url);
+                    await refresh();
+                    setSuccess('PDF attached.');
+                  } catch (err) {
+                    setError(err instanceof Error ? err.message : 'Failed to attach PDF');
+                  } finally {
+                    setBusy(false);
+                    event.target.value = '';
+                  }
+                }} />
+            </label>
+          )}
           {pdfUrl ? (
             <iframe
               src={pdfUrl}

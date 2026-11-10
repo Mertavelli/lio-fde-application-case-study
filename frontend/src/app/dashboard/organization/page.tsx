@@ -3,7 +3,7 @@
 import { useState, useEffect } from 'react';
 import * as api from '@/lib/api';
 import { Button, Input, Alert } from '@/components/base';
-import type { OrganizationMemberWithProfile, OrganizationInvite } from '@/types/database';
+import type { OrganizationMemberWithProfile, OrganizationInvite, CommodityGroup } from '@/types/database';
 
 type Tab = 'members' | 'settings';
 
@@ -26,6 +26,13 @@ export default function OrganizationPage() {
   const [organizationName, setOrganizationName] = useState<string>('');
   const [role, setRole] = useState<api.MemberRole | null>(null);
   const [requiredFields, setRequiredFields] = useState<api.ConfigurableRequiredField[]>([]);
+  const [autoApproveBelow, setAutoApproveBelow] = useState('');
+  const [categoryRules, setCategoryRules] = useState<api.CategoryRule[]>([]);
+  const [commodityGroups, setCommodityGroups] = useState<CommodityGroup[]>([]);
+  const [ruleTerm, setRuleTerm] = useState('');
+  const [ruleKind, setRuleKind] = useState('');
+  const [ruleGroup, setRuleGroup] = useState('');
+  const [ruleMaximum, setRuleMaximum] = useState('');
   const [savingSettings, setSavingSettings] = useState(false);
 
   useEffect(() => {
@@ -41,13 +48,17 @@ export default function OrganizationPage() {
       setOrganizationName(org.name);
       setRole(org.role);
 
-      const [result, settings] = await Promise.all([
+      const [result, settings, groups] = await Promise.all([
         api.organizations.getMembers(),
         api.organizations.getSettings(),
+        api.commodityGroups.list(),
       ]);
       setMembers(result.members);
       setInvites(result.invites);
       setRequiredFields(settings.required_fields);
+      setAutoApproveBelow(settings.auto_approve_below == null ? '' : String(settings.auto_approve_below));
+      setCategoryRules(settings.category_rules);
+      setCommodityGroups(groups);
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to load organization');
     }
@@ -111,6 +122,59 @@ export default function OrganizationPage() {
       await loadOrganization(); // revert to server state
     }
     setSavingSettings(false);
+  };
+
+  const saveApprovalThreshold = async () => {
+    const threshold = autoApproveBelow.trim() ? Number(autoApproveBelow) : null;
+    if (threshold !== null && (!Number.isFinite(threshold) || threshold <= 0)) {
+      setError('Enter a positive amount or leave the field empty to disable automatic approval.');
+      return;
+    }
+    setSavingSettings(true);
+    setError('');
+    setSuccess('');
+    try {
+      const saved = await api.organizations.updateSettings({ auto_approve_below: threshold });
+      setAutoApproveBelow(saved.auto_approve_below == null ? '' : String(saved.auto_approve_below));
+      setSuccess('Approval threshold updated.');
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to update approval threshold');
+      await loadOrganization();
+    }
+    setSavingSettings(false);
+  };
+
+  const saveCategoryRules = async (rules: api.CategoryRule[]): Promise<boolean> => {
+    setSavingSettings(true);
+    setError('');
+    setSuccess('');
+    try {
+      const saved = await api.organizations.updateSettings({ category_rules: rules });
+      setCategoryRules(saved.category_rules);
+      setSuccess('Booking rules updated.');
+      return true;
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to update booking rules');
+      return false;
+    } finally {
+      setSavingSettings(false);
+    }
+  };
+
+  const addCategoryRule = async () => {
+    const term = ruleTerm.trim();
+    const maximum = ruleMaximum.trim() ? Number(ruleMaximum) : null;
+    if ((!ruleKind && term.length < 2) || (ruleKind && term.length > 0) || !ruleGroup || (maximum !== null && (!Number.isFinite(maximum) || maximum < 0))) {
+      setError('Enter a term, a commodity group and a valid optional maximum.');
+      return;
+    }
+    if (categoryRules.some((rule) => ruleKind ? rule.item_kind === ruleKind : rule.term?.toLowerCase() === term.toLowerCase())) {
+      setError('A rule with this term already exists.');
+      return;
+    }
+    if (await saveCategoryRules([...categoryRules, { ...(ruleKind ? { item_kind: ruleKind as 'cable_tie' | 'printer_toner' | 'software_subscription' } : { term }), commodity_group_id: Number(ruleGroup), max_total: maximum }])) {
+      setRuleTerm(''); setRuleKind(''); setRuleGroup(''); setRuleMaximum('');
+    }
   };
 
   if (loading) {
@@ -291,6 +355,50 @@ export default function OrganizationPage() {
                 </label>
               );
             })}
+          </div>
+          <div className="mt-7 border-t border-line pt-6">
+            <h3 className="text-base font-semibold text-ink">Automatic approval</h3>
+            <p className="text-sm text-ink/55 mt-1 mb-3">
+              Requests strictly below this total are approved automatically. Use the full request total including shipping and tax. Leave empty to require buyer approval for every request.
+            </p>
+            <div className="flex flex-col sm:flex-row gap-3 sm:items-end">
+              <Input label="Threshold ($)" type="number" min="0.01" step="0.01" value={autoApproveBelow}
+                onChange={(event) => setAutoApproveBelow(event.target.value)} placeholder="Disabled" />
+              <Button type="button" onClick={saveApprovalThreshold} disabled={savingSettings}>Save threshold</Button>
+            </div>
+          </div>
+          <div className="mt-7 border-t border-line pt-6">
+            <h3 className="text-base font-semibold text-ink">Booking category rules</h3>
+            <p className="text-sm text-ink/55 mt-1 mb-3">Article kinds and custom terms apply only to this organization. A maximum limits the rule by the full request total. Acme treats software subscriptions up to $500 as small; confirm this policy with the customer.</p>
+            <div className="space-y-2 mb-4">
+              {categoryRules.map((rule) => (
+                <div key={rule.item_kind || rule.term} className="flex items-center justify-between gap-3 rounded-xl border border-line px-4 py-3 text-sm">
+                  <span>{rule.item_kind?.replaceAll('_', ' ') || rule.term} → {commodityGroups.find((group) => group.id === rule.commodity_group_id)?.name || rule.commodity_group_id}
+                    {rule.max_total != null ? ` · up to $${rule.max_total}` : ''}</span>
+                  <button type="button" className="text-red-600 disabled:opacity-50" disabled={savingSettings}
+                    onClick={() => saveCategoryRules(categoryRules.filter((item) => (item.item_kind || item.term) !== (rule.item_kind || rule.term)))}>Remove</button>
+                </div>
+              ))}
+            </div>
+            <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+              <div>
+                <label className="text-sm text-ink/70">Article kind
+                  <select className="mt-1.5 h-11 w-full rounded-xl border border-line px-3 text-ink" value={ruleKind} onChange={(event) => { setRuleKind(event.target.value); setRuleTerm(''); }}>
+                    <option value="">Custom text term</option><option value="cable_tie">Cable ties</option>
+                    <option value="printer_toner">Printer toner</option><option value="software_subscription">Software subscription</option>
+                  </select>
+                </label>
+                {!ruleKind && <Input label="Item term" value={ruleTerm} onChange={(event) => setRuleTerm(event.target.value)} placeholder="e.g. cable ties" />}
+              </div>
+              <label className="text-sm text-ink/70">Commodity group
+                <select className="mt-1.5 h-11 w-full rounded-xl border border-line px-3 text-ink" value={ruleGroup} onChange={(event) => setRuleGroup(event.target.value)}>
+                  <option value="">Select a group</option>
+                  {commodityGroups.map((group) => <option key={group.id} value={group.id}>{group.name}</option>)}
+                </select>
+              </label>
+              <Input label="Maximum total ($), optional" type="number" min="0" step="0.01" value={ruleMaximum} onChange={(event) => setRuleMaximum(event.target.value)} />
+            </div>
+            <Button type="button" className="mt-3" onClick={addCategoryRule} disabled={savingSettings}>Add rule</Button>
           </div>
         </div>
       )}

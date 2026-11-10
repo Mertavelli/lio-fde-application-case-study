@@ -1,8 +1,11 @@
 import uuid
 from datetime import datetime
+from decimal import Decimal
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, EmailStr, Field
+ItemKind = Literal["cable_tie", "printer_toner", "software_subscription", "other", "uncertain"]
+
+from pydantic import BaseModel, ConfigDict, EmailStr, Field, field_validator, model_validator
 
 MemberRole = Literal["admin", "buyer", "requester"]
 
@@ -21,6 +24,44 @@ class OrganizationSettings(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     required_fields: list[ConfigurableRequiredField] = Field(default_factory=list)
+    category_rules: list["CategoryRule"] = Field(default_factory=list)
+    auto_approve_below: float | None = Field(default=None, gt=0, le=1_000_000_000, allow_inf_nan=False)
+
+    @field_validator("auto_approve_below")
+    @classmethod
+    def threshold_in_cents(cls, value: float | None) -> float | None:
+        if value is not None and Decimal(str(value)).as_tuple().exponent < -2:
+            raise ValueError("Approval threshold must have at most two decimal places")
+        return value
+
+    @model_validator(mode="after")
+    def unique_category_terms(self):
+        terms = [(rule.term.casefold().strip() if rule.term else f"kind:{rule.item_kind}") for rule in self.category_rules]
+        if len(terms) != len(set(terms)):
+            raise ValueError("Category rule terms must be unique")
+        return self
+
+
+class CategoryRule(BaseModel):
+    term: str | None = Field(default=None, min_length=2, max_length=100)
+    item_kind: ItemKind | None = None
+    commodity_group_id: int
+    max_total: float | None = Field(default=None, ge=0, allow_inf_nan=False)
+
+    @field_validator("max_total")
+    @classmethod
+    def max_total_in_cents(cls, value: float | None) -> float | None:
+        if value is not None and Decimal(str(value)).as_tuple().exponent < -2:
+            raise ValueError("Rule maximum must have at most two decimal places")
+        return value
+
+    @model_validator(mode="after")
+    def one_selector(self):
+        if bool(self.term) == bool(self.item_kind):
+            raise ValueError("A rule needs exactly one term or article kind")
+        if self.item_kind in ("other", "uncertain"):
+            raise ValueError("Only specific article kinds may have booking rules")
+        return self
 
 
 class OrganizationCreate(BaseModel):

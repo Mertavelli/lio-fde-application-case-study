@@ -1,8 +1,9 @@
 import uuid
 from datetime import datetime
+from decimal import Decimal
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 RequestStatus = Literal["open", "in_progress", "closed"]
 ApprovalStatus = Literal["pending", "approved", "rejected"]
@@ -13,11 +14,26 @@ ApprovalStatus = Literal["pending", "approved", "rejected"]
 # ---------------------------------------------------------------------------
 
 class OrderLineIn(BaseModel):
-    position_description: str = Field(alias="positionDescription")
-    unit_price: float = Field(alias="unitPrice")
-    amount: float
-    unit: str
-    total_price: float = Field(alias="totalPrice")
+    position_description: str = Field(alias="positionDescription", min_length=1, max_length=2000)
+    unit_price: float = Field(alias="unitPrice", ge=0, le=1_000_000_000, allow_inf_nan=False)
+    amount: float = Field(gt=0, le=99_999_999.9999, allow_inf_nan=False)
+    unit: str = Field(min_length=1, max_length=100)
+    total_price: float = Field(alias="totalPrice", ge=0, le=1_000_000_000, allow_inf_nan=False)
+    catalog_article_id: uuid.UUID | None = Field(default=None, alias="catalogArticleId")
+
+    @field_validator("unit_price", "total_price")
+    @classmethod
+    def cents_only(cls, value: float) -> float:
+        if Decimal(str(value)).as_tuple().exponent < -2:
+            raise ValueError("Money amounts must have at most two decimal places")
+        return value
+
+    @field_validator("amount")
+    @classmethod
+    def four_decimal_places(cls, value: float) -> float:
+        if Decimal(str(value)).as_tuple().exponent < -4:
+            raise ValueError("Quantities must have at most four decimal places")
+        return value
 
 
 class RequestCreate(BaseModel):
@@ -26,9 +42,16 @@ class RequestCreate(BaseModel):
     vendor_name: str = Field(alias="vendorName")
     vat_id: str | None = Field(default=None, alias="vatId")
     commodity_group_id: int = Field(alias="commodityGroupId")
-    total_cost: float = Field(alias="totalCost")
+    total_cost: float = Field(alias="totalCost", ge=0, le=1_000_000_000, allow_inf_nan=False)
     department: str | None = None
-    order_lines: list[OrderLineIn] = Field(alias="orderLines", min_length=1)
+    order_lines: list[OrderLineIn] = Field(alias="orderLines", min_length=1, max_length=100)
+
+    @field_validator("total_cost")
+    @classmethod
+    def cents_only(cls, value: float) -> float:
+        if Decimal(str(value)).as_tuple().exponent < -2:
+            raise ValueError("Money amounts must have at most two decimal places")
+        return value
 
 
 class RequestUpdate(BaseModel):
@@ -37,9 +60,14 @@ class RequestUpdate(BaseModel):
     vendor_name: str = Field(alias="vendorName")
     vat_id: str | None = Field(default=None, alias="vatId")
     commodity_group_id: int = Field(alias="commodityGroupId")
-    total_cost: float = Field(alias="totalCost")
+    total_cost: float = Field(alias="totalCost", ge=0, le=1_000_000_000, allow_inf_nan=False)
     department: str | None = None
-    order_lines: list[OrderLineIn] = Field(alias="orderLines")
+    order_lines: list[OrderLineIn] = Field(alias="orderLines", min_length=1, max_length=100)
+
+    @field_validator("total_cost")
+    @classmethod
+    def cents_only(cls, value: float) -> float:
+        return RequestCreate.cents_only(value)
 
 
 class StatusUpdate(BaseModel):
@@ -48,6 +76,11 @@ class StatusUpdate(BaseModel):
 
 class ApprovalDecision(BaseModel):
     decision: Literal["approved", "rejected"]
+
+
+class ClassificationReview(BaseModel):
+    kinds: list[Literal["cable_tie", "printer_toner", "software_subscription", "other"]]
+    reason: str = Field(min_length=5, max_length=500)
 
 
 # ---------------------------------------------------------------------------
@@ -105,6 +138,8 @@ class RequestOut(BaseModel):
     approval_status: ApprovalStatus
     approved_by: uuid.UUID | None
     approved_at: datetime | None
+    approval_source: str | None
+    classification: dict | None
     total_cost: float | None
     created_at: datetime
     updated_at: datetime

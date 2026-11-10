@@ -57,7 +57,10 @@ def seed_commodity_groups(db: Session) -> int:
     existing = set(db.scalars(select(CommodityGroup.id)))
     new = [
         CommodityGroup(id=cg_id, category=category, name=name)
-        for cg_id, category, name in COMMODITY_GROUPS
+        for cg_id, category, name in COMMODITY_GROUPS + [
+            (2001, "Information Technology", "IT Hardware"),
+            (2002, "Office & Administration", "Office Supplies"),
+        ]
         if cg_id not in existing
     ]
     db.add_all(new)
@@ -173,6 +176,14 @@ def seed(db: Session) -> dict[str, int]:
     db.flush()
     dev_org = db.scalar(select(Organization).where(Organization.slug == "acme"))
     dev_org_id = dev_org.id if dev_org else None
+    if dev_org and "category_rules" not in (dev_org.settings or {}):
+        dev_org.settings = {**(dev_org.settings or {}), "category_rules": [
+            {"item_kind": "cable_tie", "commodity_group_id": 11},
+            {"item_kind": "printer_toner", "commodity_group_id": 2001},
+            {"item_kind": "software_subscription", "commodity_group_id": 2002, "max_total": 500},
+        ]}
+    if dev_org and "auto_approve_below" not in (dev_org.settings or {}):
+        dev_org.settings = {**(dev_org.settings or {}), "auto_approve_below": 2000}
     counts = {
         "commodity_groups": seed_commodity_groups(db),
         # Master data belongs to Acme; skip if that org somehow isn't seeded.
