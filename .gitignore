@@ -13,3 +13,6 @@ backend/**/*.egg-info/
 .env.*
 !.env.example
 **/.pytest_cache/
+
+# Local development-tool notes
+/.trail/
