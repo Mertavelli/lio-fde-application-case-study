@@ -1,6 +1,6 @@
 'use client';
 
-import { useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import { useMutation } from '@tanstack/react-query';
 import * as api from '@/lib/api';
@@ -13,10 +13,13 @@ interface OrderLine {
   amount: number;
   unit: string;
   totalPrice: number;
+  catalogArticleId?: string;
 }
 
 export default function NewRequestPage() {
   const router = useRouter();
+  const uploadVersion = useRef(0);
+  const submittingNow = useRef(false);
   const { data: commodityGroups } = useCommodityGroups();
 
   // Form state
@@ -28,6 +31,8 @@ export default function NewRequestPage() {
   const [commodityGroupId, setCommodityGroupId] = useState<number | null>(null);
   const [orderLines, setOrderLines] = useState<OrderLine[]>([]);
   const [totalCost, setTotalCost] = useState<number>(0);
+  const [keepQuotedTotal, setKeepQuotedTotal] = useState(false);
+  const [pdfReviewed, setPdfReviewed] = useState(false);
 
   // UI state
   const [file, setFile] = useState<File | null>(null);
@@ -35,6 +40,43 @@ export default function NewRequestPage() {
   const [success, setSuccess] = useState('');
   const [warning, setWarning] = useState('');
   const [extracting, setExtracting] = useState(false);
+  const [submitting, setSubmitting] = useState(false);
+  const [suggestions, setSuggestions] = useState<Record<number, api.ArticleSuggestion[]>>({});
+  const [findingSimilar, setFindingSimilar] = useState<number | null>(null);
+  const [similarMessage, setSimilarMessage] = useState<Record<number, string>>({});
+  const [unreviewedValues, setUnreviewedValues] = useState<string[]>([]);
+
+  useEffect(() => {
+    let active = true;
+    const timer = setTimeout(async () => {
+      const results = await Promise.all(orderLines.map(async (line) => {
+        if (line.positionDescription.trim().length < 3 || !line.unit.trim() || line.amount <= 0) return [];
+        try { return await api.articles.suggestions(line.positionDescription, line.unit, vendorName, line.amount); }
+        catch { return []; }
+      }));
+      if (active) setSuggestions(Object.fromEntries(results.map((items, index) => [index, items])));
+    }, 350);
+    return () => { active = false; clearTimeout(timer); };
+  }, [orderLines, vendorName]);
+
+  const findSimilar = async (index: number) => {
+    const line = orderLines[index];
+    setFindingSimilar(index);
+    setSimilarMessage((current) => ({ ...current, [index]: '' }));
+    try {
+      const found = await api.articles.semanticSuggestions(line.positionDescription, line.unit, vendorName, line.unitPrice, line.amount);
+      setSuggestions((current) => {
+        const existing = current[index] || [];
+        const ids = new Set(existing.map((item) => item.id));
+        return { ...current, [index]: [...existing, ...found.filter((item) => !ids.has(item.id))] };
+      });
+      if (!found.length) setSimilarMessage((current) => ({ ...current, [index]: 'No comparable catalog article found.' }));
+    } catch (err) {
+      setSimilarMessage((current) => ({ ...current, [index]: err instanceof Error ? err.message : 'Search unavailable.' }));
+    } finally {
+      setFindingSimilar(null);
+    }
+  };
 
   // PDF parsing mutation
   const parsePDFMutation = useMutation({
@@ -57,7 +99,15 @@ export default function NewRequestPage() {
       return;
     }
 
+    const version = ++uploadVersion.current;
+
     setFile(uploadedFile);
+    setCommodityGroupId(null);
+    setSuggestions({});
+    setOrderLines([]);
+    setTitle(''); setVendorName(''); setVatId(''); setDepartment(''); setTotalCost(0);
+    setUnreviewedValues([]);
+    setPdfReviewed(false);
     setError('');
     setSuccess('');
     setWarning('');
@@ -69,6 +119,7 @@ export default function NewRequestPage() {
 
       // Step 2: Extract structured data AND classify commodity group in one AI call
       const extractionResult = await api.extraction.extract(pdfText);
+      if (version !== uploadVersion.current) return;
       
       if (!extractionResult.success || !extractionResult.data) {
         throw new Error(extractionResult.error || 'Failed to extract data');
@@ -81,34 +132,46 @@ export default function NewRequestPage() {
       setVendorName(extracted.vendorName || '');
       setVatId(extracted.vatId || '');
       setDepartment(extracted.department || '');
-      setOrderLines(extracted.orderLines || []);
+      setOrderLines((extracted.orderLines || []).map((line) => ({
+        ...line, positionDescription: line.positionDescription ?? '', unit: line.unit ?? '',
+        unitPrice: line.unitPrice ?? 0, amount: line.amount ?? 0,
+        totalPrice: line.totalPrice ?? 0,
+      })));
       setTotalCost(extracted.totalCost || 0);
+      setKeepQuotedTotal(extracted.totalCost !== null);
+      setUnreviewedValues([
+        ...extracted.orderLines.flatMap((line, index) =>
+          (['unitPrice', 'amount', 'totalPrice'] as const)
+            .filter((field) => line[field] === null)
+            .map((field) => `${index}:${field}`)),
+        ...(extracted.totalCost === null ? ['totalCost'] : []),
+      ]);
       
       // Set commodity group (now included in extraction)
-      if (extracted.commodityGroupId) {
-        setCommodityGroupId(extracted.commodityGroupId);
-      }
+      setCommodityGroupId(extracted.commodityGroupId);
 
       // Show warnings for missing fields
-      if (extractionResult.missingFields && extractionResult.missingFields.length > 0) {
-        setWarning(
-          `⚠️ Could not extract: ${extractionResult.missingFields.join(', ')}. Please fill in these fields manually.`
-        );
-      }
+      const issues = [
+        ...(extractionResult.missingFields?.length ? [`Missing: ${extractionResult.missingFields.join(', ')}`] : []),
+        ...(extractionResult.warnings || []),
+      ];
+      if (issues.length) setWarning(`${issues.join(' ')} Please review the quote before submitting.`);
 
       setSuccess('✓ PDF extracted successfully! Review and submit.');
       window.scrollTo({ top: 0, behavior: 'smooth' });
     } catch (err) {
+      if (version !== uploadVersion.current) return;
       console.error('Extraction error:', err);
       setError(err instanceof Error ? err.message : 'Failed to extract data from PDF');
       window.scrollTo({ top: 0, behavior: 'smooth' });
     } finally {
-      setExtracting(false);
+      if (version === uploadVersion.current) setExtracting(false);
     }
   };
 
   // Add order line manually
   const addOrderLine = () => {
+    setPdfReviewed(false);
     setOrderLines([
       ...orderLines,
       {
@@ -125,33 +188,69 @@ export default function NewRequestPage() {
   const updateOrderLine = (index: number, field: keyof OrderLine, value: string | number) => {
     const updated = [...orderLines];
     updated[index] = { ...updated[index], [field]: value };
+    if (field === 'positionDescription' || field === 'unitPrice' || field === 'unit' || field === 'amount') {
+      delete updated[index].catalogArticleId;
+      setPdfReviewed(false);
+    }
     
     // Auto-calculate total price
     if (field === 'unitPrice' || field === 'amount') {
-      updated[index].totalPrice = updated[index].unitPrice * updated[index].amount;
+      updated[index].totalPrice = Math.round(updated[index].unitPrice * updated[index].amount * 100) / 100;
     }
     
     setOrderLines(updated);
+    if (field === 'unitPrice' || field === 'amount') {
+      setUnreviewedValues((current) => {
+        const remaining = current.filter((key) => key !== `${index}:${field}`);
+        return remaining.some((key) => key === `${index}:unitPrice` || key === `${index}:amount`)
+          ? remaining : remaining.filter((key) => key !== `${index}:totalPrice`);
+      });
+    }
     
     // Update total cost
-    const newTotal = updated.reduce((sum, line) => sum + line.totalPrice, 0);
-    setTotalCost(newTotal);
+    if (!keepQuotedTotal) setTotalCost((current) => Math.round((current + updated[index].totalPrice - orderLines[index].totalPrice) * 100) / 100);
+  };
+
+  const applyNegotiatedPrice = (index: number, item: api.ArticleSuggestion) => {
+    updateOrderLine(index, 'unitPrice', Number(item.unitPrice));
+    setOrderLines((current) => current.map((line, i) => i === index ? { ...line, unitPrice: Number(item.unitPrice), totalPrice: Math.round(Number(item.unitPrice) * line.amount * 100) / 100, catalogArticleId: item.id } : line));
+    setUnreviewedValues((current) => [...new Set([...current, 'totalCost'])]);
+    setPdfReviewed(false);
+    setWarning('Negotiated price applied. Recalculate the request total including tax and shipping, then review the PDF again before submitting.');
   };
 
   // Remove order line
   const removeOrderLine = (index: number) => {
+    setPdfReviewed(false);
     const updated = orderLines.filter((_, i) => i !== index);
     setOrderLines(updated);
-    const newTotal = updated.reduce((sum, line) => sum + line.totalPrice, 0);
-    setTotalCost(newTotal);
+    setUnreviewedValues((current) => current.flatMap((key) => {
+      if (key === 'totalCost') return [key];
+      const [lineIndex, field] = key.split(':');
+      const oldIndex = Number(lineIndex);
+      return oldIndex === index ? [] : [`${oldIndex > index ? oldIndex - 1 : oldIndex}:${field}`];
+    }));
+    if (!keepQuotedTotal) setTotalCost((current) => Math.round((current - orderLines[index].totalPrice) * 100) / 100);
   };
 
   // Submit form
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (submittingNow.current || extracting) return;
     setError('');
     setSuccess('');
-    setWarning('');
+
+    if (file && !pdfReviewed) {
+      setError('Compare the extracted fields with the PDF and confirm your review before submitting.');
+      window.scrollTo({ top: 0, behavior: 'smooth' });
+      return;
+    }
+
+    if (unreviewedValues.length) {
+      setError('Some prices or quantities were missing from the PDF. Review and edit the flagged values before submitting.');
+      window.scrollTo({ top: 0, behavior: 'smooth' });
+      return;
+    }
 
     // Validation with scroll to top on error
     if (!commodityGroupId) {
@@ -166,7 +265,10 @@ export default function NewRequestPage() {
       return;
     }
 
+    let createdSuccessfully = false;
     try {
+      submittingNow.current = true;
+      setSubmitting(true);
       const created = await api.requests.create({
         requestorName,
         titleShortDescription: title,
@@ -177,13 +279,15 @@ export default function NewRequestPage() {
         department,
         orderLines,
       });
+      createdSuccessfully = true;
 
       // Attach the original PDF (if one was uploaded) so it shows on the detail page.
       if (file) {
         try {
           await api.requests.uploadDocument(created.id, file);
         } catch {
-          // Non-fatal — the request itself was created.
+          router.push(`/dashboard/requests/${created.id}?attachment=failed`);
+          return;
         }
       }
 
@@ -196,6 +300,11 @@ export default function NewRequestPage() {
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to create request');
       window.scrollTo({ top: 0, behavior: 'smooth' });
+    } finally {
+      if (!createdSuccessfully) {
+        submittingNow.current = false;
+        setSubmitting(false);
+      }
     }
   };
 
@@ -317,7 +426,7 @@ export default function NewRequestPage() {
             <Input
               label="Vendor Name *"
               value={vendorName}
-              onChange={(e) => setVendorName(e.target.value)}
+              onChange={(e) => { setVendorName(e.target.value); setPdfReviewed(false); }}
               required
               placeholder="Adobe Systems"
             />
@@ -325,7 +434,7 @@ export default function NewRequestPage() {
             <Input
               label="Tax ID"
               value={vatId}
-              onChange={(e) => setVatId(e.target.value)}
+              onChange={(e) => { setVatId(e.target.value); setPdfReviewed(false); }}
               placeholder="12-3456789"
             />
           </div>
@@ -336,7 +445,7 @@ export default function NewRequestPage() {
             </label>
             <select
               value={commodityGroupId || ''}
-              onChange={(e) => setCommodityGroupId(Number(e.target.value))}
+              onChange={(e) => { setCommodityGroupId(Number(e.target.value)); setPdfReviewed(false); }}
               required
               className="w-full px-3 py-2 border border-gray-300 rounded-lg text-gray-900 focus:ring-2 focus:ring-accent-deep/60 focus:border-accent-deep/40"
             >
@@ -430,6 +539,27 @@ export default function NewRequestPage() {
                       ${line.totalPrice.toFixed(2)}
                     </span>
                   </div>
+                  <button type="button" onClick={() => findSimilar(index)}
+                    disabled={findingSimilar !== null || line.positionDescription.trim().length < 3 || !line.unit.trim() || line.amount <= 0}
+                    className="mt-3 text-sm font-medium text-accent-deep disabled:opacity-50">
+                    {findingSimilar === index ? 'Searching catalog…' : 'Find comparable catalog items'}
+                  </button>
+                  {similarMessage[index] && <p className="mt-1 text-sm text-ink/60">{similarMessage[index]}</p>}
+                  {suggestions[index]?.length > 0 && (
+                    <div className="mt-3 rounded border border-blue-200 bg-blue-50 p-3 text-sm">
+                      <p className="font-medium">Negotiated catalog options — verify specifications, supplier and pack size before changing the request</p>
+                      {suggestions[index].map((item) => (
+                        <div key={item.id} className="mt-2">
+                          <p>{item.description} ({item.articleNumber}) · {item.supplier} · quote ${line.unitPrice.toFixed(2)} / unit · catalog {item.currency} {item.unitPrice} / {item.packQuantity} {item.unit} · {item.match}</p>
+                          {item.sameSupplier && item.match === 'exact' && Number(item.packQuantity) === 1 && item.currency === 'USD' && (
+                            <button type="button" className="mt-1 font-medium text-accent-deep" onClick={() => applyNegotiatedPrice(index, item)}>
+                              Use negotiated unit price
+                            </button>
+                          )}
+                        </div>
+                      ))}
+                    </div>
+                  )}
                 </div>
               ))}
             </div>
@@ -440,13 +570,17 @@ export default function NewRequestPage() {
         <div className="bg-accent-soft/20 border-2 border-accent/40 rounded-lg p-6">
           <div className="flex items-center justify-between">
             <span className="text-lg font-medium text-gray-900">Total Cost</span>
-            <span className="text-3xl font-bold text-accent-deep">
-              ${totalCost.toFixed(2)}
-            </span>
+            <Input label="Quoted total ($), including shipping and tax" type="number" step="0.01" min="0" value={totalCost} onChange={(e) => { setTotalCost(Number(e.target.value)); setPdfReviewed(false); setUnreviewedValues((current) => current.filter((key) => key !== 'totalCost')); }} required />
           </div>
         </div>
 
         {/* Submit */}
+        {file && (
+          <label className="flex items-start gap-3 text-sm text-ink">
+            <input type="checkbox" checked={pdfReviewed} onChange={(e) => setPdfReviewed(e.target.checked)} className="mt-1" />
+            I compared the supplier, selected items and quoted total with the PDF and corrected any extraction errors.
+          </label>
+        )}
         <div className="flex items-center justify-end space-x-4">
           <Button
             type="button"
@@ -455,7 +589,7 @@ export default function NewRequestPage() {
           >
             Cancel
           </Button>
-          <Button type="submit" size="lg">
+          <Button type="submit" size="lg" disabled={submitting || extracting}>
             Create Request
           </Button>
         </div>

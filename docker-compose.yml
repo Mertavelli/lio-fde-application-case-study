@@ -13,7 +13,7 @@ services:
       timeout: 3s
       retries: 10
     ports:
-      - "5432:5432"
+      - "127.0.0.1:5432:5432"
 
   backend:
     build: ./backend
@@ -27,7 +27,7 @@ services:
       db:
         condition: service_healthy
     ports:
-      - "7200:7200"
+      - "127.0.0.1:7200:7200"
 
   frontend:
     build:
@@ -41,7 +41,7 @@ services:
     depends_on:
       - backend
     ports:
-      - "3200:3200"
+      - "127.0.0.1:3200:3200"
 
 volumes:
   postgres_data:

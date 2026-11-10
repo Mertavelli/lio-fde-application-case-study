@@ -47,6 +47,15 @@ export type ConfigurableRequiredField = 'vat_id' | 'department';
 
 export interface OrganizationSettings {
   required_fields: ConfigurableRequiredField[];
+  auto_approve_below: number | null;
+  category_rules: CategoryRule[];
+}
+
+export interface CategoryRule {
+  term?: string | null;
+  item_kind?: 'cable_tie' | 'printer_toner' | 'software_subscription' | null;
+  commodity_group_id: number;
+  max_total: number | null;
 }
 
 export interface MembersResponse {
@@ -60,6 +69,7 @@ export interface OrderLineInput {
   amount: number;
   unit: string;
   totalPrice: number;
+  catalogArticleId?: string;
 }
 
 export interface CreateRequestInput {
@@ -85,12 +95,12 @@ export interface UpdateRequestInput {
 }
 
 export interface ExtractedVendorData {
-  title: string;
-  vendorName: string;
-  vatId: string;
-  department: string;
-  orderLines: OrderLineInput[];
-  totalCost: number;
+  title: string | null;
+  vendorName: string | null;
+  vatId: string | null;
+  department: string | null;
+  orderLines: {positionDescription: string | null; unitPrice: number | null; amount: number | null; unit: string | null; totalPrice: number | null}[];
+  totalCost: number | null;
   commodityGroupId: number | null;
   commodityGroupName: string | null;
 }
@@ -100,6 +110,7 @@ export interface ExtractionResponse {
   data?: ExtractedVendorData;
   error?: string;
   missingFields?: string[];
+  warnings?: string[];
 }
 
 export interface Supplier {
@@ -189,6 +200,10 @@ export const requests = {
     return apiFetch(`/requests/${requestId}/activity`);
   },
 
+  reviewClassification(requestId: string, kinds: string[], reason: string): Promise<ProcurementRequestWithDetails> {
+    return apiFetch(`/requests/${requestId}/classification-review`, { body: { kinds, reason } });
+  },
+
   uploadDocument(requestId: string, file: File): Promise<void> {
     const formData = new FormData();
     formData.append('file', file);
@@ -260,7 +275,7 @@ export const organizations = {
     return apiFetch('/organizations/me/settings');
   },
 
-  updateSettings(settings: OrganizationSettings): Promise<OrganizationSettings> {
+  updateSettings(settings: Partial<OrganizationSettings>): Promise<OrganizationSettings> {
     return apiFetch('/organizations/me/settings', { method: 'PATCH', body: settings });
   },
 };
@@ -298,6 +313,14 @@ export const suppliers = {
 // ============================================================================
 
 export const articles = {
+  suggestions(description: string, unit: string, supplier: string, amount: number): Promise<ArticleSuggestion[]> {
+    return apiFetch(`/articles/suggestions?${new URLSearchParams({ description, unit, supplier, amount: String(amount) })}`);
+  },
+  semanticSuggestions(description: string, unit: string, supplier: string, unitPrice: number, amount: number): Promise<ArticleSuggestion[]> {
+    return apiFetch('/articles/suggestions/semantic', {
+      body: { description, unit, supplier, unit_price: unitPrice > 0 ? unitPrice : null, amount },
+    });
+  },
   list(params?: {
     search?: string;
     supplierId?: string;
@@ -316,6 +339,19 @@ export const articles = {
     return apiFetch('/articles/count');
   },
 };
+
+export interface ArticleSuggestion {
+  id: string;
+  articleNumber: string;
+  description: string;
+  supplier: string;
+  unitPrice: string;
+  currency: string;
+  unit: string;
+  packQuantity: string;
+  match: string;
+  sameSupplier: boolean;
+}
 
 // ============================================================================
 // PDF + extraction

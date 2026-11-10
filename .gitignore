@@ -1,0 +1,18 @@
+# graft's local graph cache — regenerable, not committed (run `graft build`).
+/graft/
+.venv/
+frontend/node_modules/
+frontend/.next/
+frontend/next-env.d.ts
+frontend/tsconfig.tsbuildinfo
+backend/**/*.egg-info/
+**/__pycache__/
+.env
+
+# Local credentials and generated test caches
+.env.*
+!.env.example
+**/.pytest_cache/
+
+# Local development-tool notes
+/.trail/
